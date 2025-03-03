@@ -9,6 +9,7 @@ import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
 import os
 from shapely.geometry import Point
+import matplotlib as mpl
 
 # Set matplotlib params for better output
 plt.rcParams['font.family'] = 'sans-serif'
@@ -163,13 +164,69 @@ def create_main_map(data, africa, southern_africa, include_boxes=False):
                       c=color, marker='^', s=60, label=f"{focus_type} (Data Provider)",
                       edgecolor='black', linewidth=0.5, alpha=0.9)
     
-    # Add labels for major partners
-    for idx, row in data[data['is_major_partner']].iterrows():
-        ax.annotate(row['Short_Name'], 
-                   (row.geometry.x, row.geometry.y),
-                   xytext=(5, 5), textcoords='offset points',
-                   bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8),
-                   fontsize=8, fontweight='bold')
+    # Add labels for major partners with overlap avoidance
+    used_positions = {}  # Keep track of label positions
+    
+    # Sort by latitude to prioritize placement
+    labeled_data = data[data['is_major_partner']].sort_values('lat')
+    
+    for idx, row in labeled_data.iterrows():
+        x, y = row.geometry.x, row.geometry.y
+        full_name = row['Institution']  # Use full institution name
+        
+        # Initialize label position
+        label_x = x + 0.05
+        label_y = y + 0.05
+        
+        # Check for overlaps and adjust position
+        overlap = True
+        offsets = [(0.05, 0.05), (-0.05, 0.05), (0.05, -0.05), (-0.05, -0.05),
+                  (0.1, 0), (-0.1, 0), (0, 0.1), (0, -0.1)]
+        
+        for dx, dy in offsets:
+            test_x = x + dx
+            test_y = y + dy
+            
+            # Check if this position is far enough from other labels
+            position_ok = True
+            for used_x, used_y in used_positions.values():
+                if abs(test_x - used_x) < 0.2 and abs(test_y - used_y) < 0.1:
+                    position_ok = False
+                    break
+            
+            if position_ok:
+                label_x = test_x
+                label_y = test_y
+                overlap = False
+                break
+        
+        # Store the used position
+        used_positions[full_name] = (label_x, label_y)
+        
+        # Add label with background box
+        bbox_props = dict(
+            boxstyle="round,pad=0.3",
+            fc="white",
+            ec="gray",
+            alpha=0.9,
+            mutation_scale=0.5
+        )
+        
+        # Create arrow connection
+        ax.annotate(
+            full_name,
+            xy=(x, y),  # Institution point
+            xytext=(label_x, label_y),  # Label position
+            bbox=bbox_props,
+            fontsize=8,
+            fontweight='bold',
+            arrowprops=dict(
+                arrowstyle="->",
+                connectionstyle="arc3,rad=0.2",
+                color='gray',
+                alpha=0.6
+            )
+        )
     
     # Add inset boxes if requested
     if include_boxes:
@@ -354,6 +411,81 @@ def create_inset_map(data, bbox, area_name):
 def create_combined_layout(main_fig, jhb_fig, cape_fig):
     print("Creating combined layout")
     
+    # Function to copy artists from source to target axis
+    def copy_artists(ax_source, ax_target):
+        for artist in ax_source.get_children():
+            if isinstance(artist, (plt.Line2D, plt.Polygon, plt.Text, plt.Rectangle, mpatches.Patch)):
+                try:
+                    artist_copy = artist.copy()
+                    ax_target.add_artist(artist_copy)
+                except AttributeError:
+                    # Skip annotations that can't be copied
+                    continue
+    
+    # Create new figure for combined layout
+    fig = plt.figure(figsize=(15, 10))
+    
+    # Create main map axis
+    ax_main = fig.add_axes([0.1, 0.1, 0.8, 0.8])
+    
+    # Copy main map content
+    copy_artists(main_fig.axes[0], ax_main)
+    
+    # Create Johannesburg inset
+    ax_jhb = fig.add_axes([0.82, 0.5, 0.15, 0.35])
+    copy_artists(jhb_fig.axes[0], ax_jhb)
+    
+    # Create Cape Town inset
+    ax_cape = fig.add_axes([0.82, 0.1, 0.15, 0.35])
+    copy_artists(cape_fig.axes[0], ax_cape)
+    
+    return fig
+
+# Create dashboard style layout
+def create_dashboard(main_fig, jhb_fig, cape_fig):
+    print("Creating dashboard layout")
+    
+    # Function to copy artists from source to target axis
+    def copy_artists(ax_source, ax_target):
+        # Copy collections (scatter plots, etc)
+        for collection in ax_source.collections:
+            if isinstance(collection, mpl.collections.PathCollection):
+                # Handle scatter plots
+                collection_copy = ax_target.scatter(
+                    collection.get_offsets()[:, 0],
+                    collection.get_offsets()[:, 1],
+                    s=collection.get_sizes(),
+                    c=collection.get_facecolors(),
+                    marker=collection.get_paths()[0] if len(collection.get_paths()) > 0 else 'o',
+                    alpha=collection.get_alpha(),
+                    zorder=collection.get_zorder()
+                )
+            elif isinstance(collection, mpl.collections.PatchCollection):
+                # Handle rectangles and other patches
+                for patch in collection.get_paths():
+                    patch_copy = mpatches.PathPatch(
+                        patch,
+                        facecolor=collection.get_facecolor(),
+                        edgecolor=collection.get_edgecolor(),
+                        linewidth=collection.get_linewidth(),
+                        alpha=collection.get_alpha()
+                    )
+                    ax_target.add_patch(patch_copy)
+        
+        # Copy other artists
+        for artist in ax_source.get_children():
+            if isinstance(artist, (plt.Line2D, plt.Polygon, plt.Text, plt.Rectangle, mpatches.Patch)):
+                try:
+                    artist_copy = artist.copy()
+                    ax_target.add_artist(artist_copy)
+                except (AttributeError, ValueError):
+                    # Skip artists that can't be copied
+                    continue
+        
+        # Set the limits
+        ax_target.set_xlim(ax_source.get_xlim())
+        ax_target.set_ylim(ax_source.get_ylim())
+    
     # Create a new figure for the combined layout
     fig, axes = plt.subplots(2, 1, figsize=(15, 18), gridspec_kw={'height_ratios': [1.2, 1]})
     
@@ -366,32 +498,15 @@ def create_combined_layout(main_fig, jhb_fig, cape_fig):
     axes[1].axis('off')
     bottom_grid.axis('off')
     
-    # Copy content from individual figures to the combined layout
-    for ax_source, ax_target in [(main_fig.axes[0], axes[0]), 
-                                 (jhb_fig.axes[0], bottom_left),
-                                 (cape_fig.axes[0], bottom_right)]:
-        # Get the content from the source axis
-        for artist in ax_source.get_children():
-            if isinstance(artist, (plt.Line2D, plt.Polygon, plt.Text, plt.Rectangle, mpatches.Patch)):
-                artist_copy = artist.copy()
-                ax_target.add_artist(artist_copy)
-        
-        # Copy scatter plots
-        for collection in ax_source.collections:
-            collection_copy = ax_target.scatter(
-                collection.get_offsets()[:, 0],
-                collection.get_offsets()[:, 1],
-                s=collection.get_sizes(),
-                c=collection.get_facecolors(),
-                marker=collection.get_paths()[0],
-                alpha=collection.get_alpha(),
-                zorder=collection.get_zorder()
-            )
-        
-        # Set the limits
-        ax_target.set_xlim(ax_source.get_xlim())
-        ax_target.set_ylim(ax_source.get_ylim())
-        ax_target.axis('off')
+    # Copy content from individual figures
+    copy_artists(main_fig.axes[0], axes[0])
+    copy_artists(jhb_fig.axes[0], bottom_left)
+    copy_artists(cape_fig.axes[0], bottom_right)
+    
+    # Turn off axes
+    axes[0].axis('off')
+    bottom_left.axis('off')
+    bottom_right.axis('off')
     
     # Add panel labels
     axes[0].text(-0.05, 1.0, 'A', transform=axes[0].transAxes, 
@@ -411,123 +526,6 @@ def create_combined_layout(main_fig, jhb_fig, cape_fig):
     
     # Adjust layout
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    
-    return fig
-
-# Create dashboard style layout
-def create_dashboard(main_fig, jhb_fig, cape_fig):
-    print("Creating dashboard layout")
-    
-    # Create a new figure for the dashboard
-    fig = plt.figure(figsize=(16, 12))
-    
-    # Use gridspec for more control
-    gs = fig.add_gridspec(1, 1)
-    
-    # Main map covers the entire figure
-    ax_main = fig.add_subplot(gs[0, 0])
-    
-    # Copy main map to the background
-    for artist in main_fig.axes[0].get_children():
-        if isinstance(artist, (plt.Line2D, plt.Polygon, plt.Text, plt.Rectangle, mpatches.Patch)):
-            artist_copy = artist.copy()
-            ax_main.add_artist(artist_copy)
-    
-    # Copy scatter plots
-    for collection in main_fig.axes[0].collections:
-        collection_copy = ax_main.scatter(
-            collection.get_offsets()[:, 0],
-            collection.get_offsets()[:, 1],
-            s=collection.get_sizes(),
-            c=collection.get_facecolors(),
-            marker=collection.get_paths()[0],
-            alpha=collection.get_alpha(),
-            zorder=collection.get_zorder()
-        )
-    
-    # Set the limits
-    ax_main.set_xlim(main_fig.axes[0].get_xlim())
-    ax_main.set_ylim(main_fig.axes[0].get_ylim())
-    ax_main.axis('off')
-    
-    # Add inset axes for Johannesburg
-    ax_jhb = fig.add_axes([0.55, 0.07, 0.43, 0.35])
-    ax_jhb.set_facecolor('white')
-    ax_jhb.patch.set_alpha(0.8)
-    
-    # Add inset axes for Cape Town
-    ax_cape = fig.add_axes([0.02, 0.07, 0.43, 0.35])
-    ax_cape.set_facecolor('white')
-    ax_cape.patch.set_alpha(0.8)
-    
-    # Copy Johannesburg map content
-    for artist in jhb_fig.axes[0].get_children():
-        if isinstance(artist, (plt.Line2D, plt.Polygon, plt.Text, plt.Rectangle, mpatches.Patch)):
-            artist_copy = artist.copy()
-            ax_jhb.add_artist(artist_copy)
-    
-    # Copy Cape Town map content
-    for artist in cape_fig.axes[0].get_children():
-        if isinstance(artist, (plt.Line2D, plt.Polygon, plt.Text, plt.Rectangle, mpatches.Patch)):
-            artist_copy = artist.copy()
-            ax_cape.add_artist(artist_copy)
-    
-    # Copy scatter plots for Johannesburg
-    for collection in jhb_fig.axes[0].collections:
-        collection_copy = ax_jhb.scatter(
-            collection.get_offsets()[:, 0],
-            collection.get_offsets()[:, 1],
-            s=collection.get_sizes(),
-            c=collection.get_facecolors(),
-            marker=collection.get_paths()[0],
-            alpha=collection.get_alpha(),
-            zorder=collection.get_zorder()
-        )
-    
-    # Copy scatter plots for Cape Town
-    for collection in cape_fig.axes[0].collections:
-        collection_copy = ax_cape.scatter(
-            collection.get_offsets()[:, 0],
-            collection.get_offsets()[:, 1],
-            s=collection.get_sizes(),
-            c=collection.get_facecolors(),
-            marker=collection.get_paths()[0],
-            alpha=collection.get_alpha(),
-            zorder=collection.get_zorder()
-        )
-    
-    # Set the limits
-    ax_jhb.set_xlim(jhb_fig.axes[0].get_xlim())
-    ax_jhb.set_ylim(jhb_fig.axes[0].get_ylim())
-    ax_jhb.axis('off')
-    
-    ax_cape.set_xlim(cape_fig.axes[0].get_xlim())
-    ax_cape.set_ylim(cape_fig.axes[0].get_ylim())
-    ax_cape.axis('off')
-    
-    # Add a border around insets
-    for ax, color in [(ax_jhb, '#0F1F2C'), (ax_cape, '#CD1A1B')]:
-        ax.spines['top'].set_visible(True)
-        ax.spines['bottom'].set_visible(True)
-        ax.spines['left'].set_visible(True)
-        ax.spines['right'].set_visible(True)
-        ax.spines['top'].set_color(color)
-        ax.spines['bottom'].set_color(color)
-        ax.spines['left'].set_color(color)
-        ax.spines['right'].set_color(color)
-        ax.spines['top'].set_linewidth(2)
-        ax.spines['bottom'].set_linewidth(2)
-        ax.spines['left'].set_linewidth(2)
-        ax.spines['right'].set_linewidth(2)
-    
-    # Add overall title
-    fig.suptitle("Climate & Health Initiatives in Southern Africa", 
-                fontsize=18, fontweight='bold', y=0.98)
-    fig.text(0.5, 0.95, "Regional Overview with Urban Detail Insets", 
-            ha='center', fontsize=14)
-    
-    # Adjust layout
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
     
     return fig
 
